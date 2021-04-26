@@ -1,0 +1,14 @@
+﻿[MASTER]
+
+disable=F0401,W0105,W0611,W0612,W0613,C0111,R0912,R0913,R0914,R0915,R0201
+
+optimize-ast=no
+
+max-line-length=120
+
+function-naming-style=camelCase
+method-naming-style=camelCase
+attr-naming-style=camelCase
+argument-naming-style=camelCase
+variable-naming-style=camelCase
+class-attribute-naming-style=any
