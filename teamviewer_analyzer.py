@@ -98,8 +98,8 @@ class TeamViewerIngestModule(DataSourceIngestModule):
     HKLM_SOFTWARE_HIVE_FILENAME = "SOFTWARE"
     USER_HIVE_FILENAME = "NTUSER.DAT"
 
-    EXPECTED_HKLM_SOFTWARE_HIVE_FILE_PARENT = "/windows/system32/config/"
-    EXPECTED_USER_HIVE_FILE_PARENT = "/users/"
+    HKLM_SOFTWARE_HIVE_FILE_PARENT = "/windows/system32/config/"
+    USER_HIVE_FILE_PARENT = "/users/"
 
     TEAMVIEWER_REGISTRY_KEY_PATHS = ["TeamViewer", "WOW6432Node/TeamViewer"]
 
@@ -123,8 +123,8 @@ class TeamViewerIngestModule(DataSourceIngestModule):
         "TSK_TEAMVIEWER_PARTICIPANT_ADDED": "TeamViewer Participants Added",
         "TSK_TEAMVIEWER_MEETING_CREATED": "TeamViewer Meetings Created",
         "TSK_TEAMVIEWER_MEETING_PARTICIPANT_ADDED": "TeamViewer Meeting Participant Added",
-        "TSK_TEAMVIEWER_AUTHENTICATION_ATTEMPT": "TeamViewer Authentication Failures",
-        "TSK_TEAMVIEWER_REMOTE_REBOOT": "TeamViewer Remote Reboots",
+        "TSK_TEAMVIEWER_AUTHENTICATION_ATTEMPT": "TeamViewer Authentication Events",
+        "TSK_TEAMVIEWER_REMOTE_REBOOT": "TeamViewer Remote Reboot Events",
         "TSK_TEAMVIEWER_FILE_DOWNLOAD": "TeamViewer File Download Indicators",
         "TSK_TEAMVIEWER_FILE_UPLOAD": "TeamViewer File Upload Indicators",
         "TSK_TEAMVIEWER_IP_ADDRESS": "TeamViewer IP Addresses"
@@ -150,6 +150,21 @@ class TeamViewerIngestModule(DataSourceIngestModule):
         "%.tvc": "TSK_TEAMVIEWER_CONFIG",
         "tvprint%.db": "TSK_TEAMVIEWER_DATABASE",
         "tvchatfile%.db": "TSK_TEAMVIEWER_DATABASE"
+    }
+
+    # log line match patterns with associated artifact types.
+    LOG_LINE_MATCH_TYPE_DICTIONARY = {
+        "CParticipantManagerBase participant": "TSK_TEAMVIEWER_PARTICIPANT_ADDED",
+        "New Participant added": "TSK_TEAMVIEWER_PARTICIPANT_ADDED",
+        "Start meeting with MeetingID": "TSK_TEAMVIEWER_MEETING_CREATED",
+        "blitz::ManagerImpl::AddParticipant": "TSK_TEAMVIEWER_MEETING_PARTICIPANT_ADDED",
+        "attempt number ": "TSK_TEAMVIEWER_AUTHENTICATION_ATTEMPT",
+        "password was denied": "TSK_TEAMVIEWER_AUTHENTICATION_ATTEMPT",
+        "CRemoteReboot::Reboot": "TSK_TEAMVIEWER_REMOTE_REBOOT",
+        "Write file": "TSK_TEAMVIEWER_FILE_DOWNLOAD",
+        "Download from": "TSK_TEAMVIEWER_FILE_DOWNLOAD",
+        "Upload from": "TSK_TEAMVIEWER_FILE_UPLOAD",
+
     }
 
     TEMP_DIR_NAME = "teamviewer"
@@ -198,10 +213,10 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                 artifactTypeId = self.case.getArtifactTypeID(artifactType)
                 if artifactTypeId == -1:
                     self.case.addArtifactType(artifactType, displayName)
-            except TskCoreException as e:
+            except TskCoreException as exception:
                 TeamViewerIngestModule.log(Level.SEVERE, "Failed to create artifact of type %s." %
                                            artifactType)
-                TeamViewerIngestModule.log(Level.SEVERE, e.getMessage())
+                TeamViewerIngestModule.log(Level.SEVERE, exception.getMessage())
                 return
 
         self.tempDirPath = os.path.join(Case.getCurrentCase().getTempDirectory(),
@@ -244,14 +259,14 @@ class TeamViewerIngestModule(DataSourceIngestModule):
         progressBar.switchToIndeterminate()
 
         # Locate files of interest.
-        localMachineSoftwareHiveFileList = self.fileManager.findFiles(dataSource,
-                                          TeamViewerIngestModule.HKLM_SOFTWARE_HIVE_FILENAME,
-                                          TeamViewerIngestModule.EXPECTED_HKLM_SOFTWARE_HIVE_FILE_PARENT)
+        hklmSoftwareHiveFileList = self.fileManager.findFiles(dataSource,
+                                                              TeamViewerIngestModule.HKLM_SOFTWARE_HIVE_FILENAME,
+                                                              TeamViewerIngestModule.HKLM_SOFTWARE_HIVE_FILE_PARENT)
         userHiveFileList = self.fileManager.findFiles(dataSource,
-                                          TeamViewerIngestModule.USER_HIVE_FILENAME,
-                                          TeamViewerIngestModule.EXPECTED_USER_HIVE_FILE_PARENT)
+                                                      TeamViewerIngestModule.USER_HIVE_FILENAME,
+                                                      TeamViewerIngestModule.USER_HIVE_FILE_PARENT)
 
-        hiveFileList = localMachineSoftwareHiveFileList + userHiveFileList
+        hiveFileList = hklmSoftwareHiveFileList + userHiveFileList
 
         # Create a dictionary of File IDs to match strings to count files and record
         # results, therefore not requiring a further search later.
@@ -413,19 +428,19 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                 keyValue = keyValue.replace("]", "")
 
                 # Extract each entry, considering only those that are long enough to contain information
-                entries = keyValue.split(",")
-                for e in entries:
-                    if len(e) > 5:
+                entryList = keyValue.split(",")
+                for entry in entryList:
+                    if len(entry) > 5:
                         attributes = ArrayList()
                         extractedId = ""
                         localPath = ""
                         remotePath = ""
 
-                        extractedIdList = re.findall("[0-9]+", e)
-                        if len(extractedIdList) > 0:
+                        extractedIdList = re.findall("[0-9]+", entry)
+                        if extractedIdList:
                             extractedId = extractedIdList[0]
 
-                        extractedPaths = e.split("|")
+                        extractedPaths = entry.split("|")
                         if len(extractedPaths) > 1:
                             remotePath = extractedPaths[1]
                             localPath = extractedPaths[0].split("?")[1]
@@ -445,7 +460,7 @@ class TeamViewerIngestModule(DataSourceIngestModule):
 
                         artifact.addAttributes(attributes)
 
-                        if not extractedId == "":
+                        if extractedId != "":
                             self.createTeamViewerIdArtefact(abstractFile,
                                                             extractedId,
                                                             "Extracted from File Transfer Registry Key",
@@ -460,14 +475,14 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                 self.createTeamViewerUsernameArtefact(abstractFile, keyValue,
                                                       description + " from Registry", artifact)
             elif keyName == "LastMACUsed":
-                entries = re.findall("[0-9A-Fa-f]{12}", keyValue)
-                for e in entries:
+                entryList = re.findall("[0-9A-Fa-f]{12}", keyValue)
+                for entry in entryList:
                     attributes = ArrayList()
                     artifact = abstractFile.newArtifact(self.case.getArtifactTypeID(
                         "TSK_TEAMVIEWER_MAC_ADDRESS"))
 
                     attributes.add(TeamViewerIngestModule.createAttribute(
-                        BlackboardAttribute.ATTRIBUTE_TYPE.TSK_VALUE, e))
+                        BlackboardAttribute.ATTRIBUTE_TYPE.TSK_VALUE, entry))
                     attributes.add(TeamViewerIngestModule.createAttribute(
                         BlackboardAttribute.ATTRIBUTE_TYPE.TSK_ASSOCIATED_ARTIFACT,
                         originalArtifact.getArtifactID()))
@@ -491,13 +506,22 @@ class TeamViewerIngestModule(DataSourceIngestModule):
      """
     def processLogFile(self, abstractFile, artifact):
         filePath = self.createTemporaryFile(abstractFile)
-        with open(filePath, "r") as fp:
-            for line in fp:
+        with open(filePath, "r") as openedFile:
+            for line in openedFile:
                 self.identifyIpAddresses(abstractFile, line, "Extracted from log file.",
                                          artifact)
-                #TODO Reboot
-                #TODO Meeting
-                #TODO
+                # A valid line must include basic information of the form:
+                # <YYYY/MM/DD> <HH:MM:SS.mmm> <PID> <Unknown> <Unknown> <Details>
+                if len(line.split()) < 6:
+                    continue
+
+                for match, artifactTypeName in \
+                        TeamViewerIngestModule.LOG_LINE_MATCH_TYPE_DICTIONARY.items():
+                    if match in line:
+                        self.createBasicLogArtifact(artifactTypeName, abstractFile,
+                                                    line, match, artifact)
+                        break
+
 
     """Processes a TeamViewer session file.
     
@@ -510,11 +534,11 @@ class TeamViewerIngestModule(DataSourceIngestModule):
      """
     def processSessionFile(self, abstractFile, artifact):
         filePath = self.createTemporaryFile(abstractFile)
-        with open(filePath, "r") as fp:
-            line = fp.readline()
+        with open(filePath, "r") as openedFile:
+            line = openedFile.readline()
             if line == "TVS":
                 for _ in range(6):
-                    line = fp.readline()
+                    line = openedFile.readline()
                     self.identifyIpAddresses(abstractFile, line,
                                              "Extracted from session file.", artifact)
                     if line == "":
@@ -549,10 +573,10 @@ class TeamViewerIngestModule(DataSourceIngestModule):
      """
     def processConfigFile(self, abstractFile, artifact):
         filePath = self.createTemporaryFile(abstractFile)
-        with open(filePath, "r") as fp:
-            line = fp.readline()
+        with open(filePath, "r") as openedFile:
+            line = openedFile.readline()
             if "[TeamViewer Configuration]" in line:
-                line = fp.readline()
+                line = openedFile.readline()
                 self.identifyIpAddresses(abstractFile, line, "Extracted from configuration file.",
                                          artifact)
                 data = line.split("=")
@@ -566,7 +590,7 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                                                     description, artifact)
             else:
                 TeamViewerIngestModule.log(Level.INFO, "Not a valid Configuration File: %s." %
-                         abstractFile.getUniquePath())
+                                           abstractFile.getUniquePath())
 
     """Processes a TeamViewer connection file.
     
@@ -579,8 +603,8 @@ class TeamViewerIngestModule(DataSourceIngestModule):
      """
     def processConnectionFile(self, abstractFile, artifact):
         filePath = self.createTemporaryFile(abstractFile)
-        with open(filePath, "r") as fp:
-            for line in fp:
+        with open(filePath, "r") as openedFile:
+            for line in openedFile:
                 self.identifyIpAddresses(abstractFile, line, "Extracted from connection file.",
                                          artifact)
                 valueList = line.split()
@@ -608,8 +632,30 @@ class TeamViewerIngestModule(DataSourceIngestModule):
          associatedArtifact: Associated parent Artifact.
      """
     def createTeamViewerUsernameArtefact(self, abstractFile, value, description, associatedArtifact):
-        self.createBasicArtifact("TSK_TEAMVIEWER_USERNAME", abstractFile,
-                                                   value, description, associatedArtifact)
+        self.createBasicArtifact("TSK_TEAMVIEWER_USERNAME", abstractFile, value, description,
+                                 associatedArtifact)
+
+    """Searches for TeamViewer IDs in a String and creates relevant artifacts.
+    
+     Args:
+         abstractFile: AbstractFile of artifact.
+         value: Value to search for IPv4 addresses.
+         description: Description to give any found addresses.
+         associatedArtifact: Associated parent Artifact.
+     """
+    def identifyTeamViewerIds(self, abstractFile, value, description, associatedArtifact):
+        regularExpressionString = r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"
+        extractedAddresses = re.findall(regularExpressionString, value)
+        for address in extractedAddresses:
+            createdArtifact = self.createBasicArtifact("TSK_TEAMVIEWER_IP_ADDRESS", abstractFile,
+                                                       address, description, associatedArtifact)
+            attributes = ArrayList()
+
+            attributes.add(TeamViewerIngestModule.createAttribute(
+                BlackboardAttribute.ATTRIBUTE_TYPE.TSK_KEYWORD_REGEXP, regularExpressionString))
+            attributes.add(TeamViewerIngestModule.createAttribute(
+                BlackboardAttribute.ATTRIBUTE_TYPE.TSK_TEXT, value))
+            createdArtifact.addAttributes(attributes)
 
     """Searches for IPv4 addresses in a String and creates relevant artifacts.
     
@@ -624,7 +670,7 @@ class TeamViewerIngestModule(DataSourceIngestModule):
         extractedAddresses = re.findall(regularExpressionString, value)
         for address in extractedAddresses:
             createdArtifact = self.createBasicArtifact("TSK_TEAMVIEWER_IP_ADDRESS", abstractFile,
-                                 address, description, associatedArtifact)
+                                                       address, description, associatedArtifact)
             attributes = ArrayList()
 
             attributes.add(TeamViewerIngestModule.createAttribute(
@@ -657,6 +703,54 @@ class TeamViewerIngestModule(DataSourceIngestModule):
         attributes.add(TeamViewerIngestModule.createAttribute(
             BlackboardAttribute.ATTRIBUTE_TYPE.TSK_ASSOCIATED_ARTIFACT,
             associatedArtifact.getArtifactID()))
+
+        artifact.addAttributes(attributes)
+        return artifact
+
+    """Creates a new TeamViewer Artifact from a log line with basic values.
+    
+     Args:
+        artifactTypeName: Type name of the artifact.
+        abstractFile: AbstractFile of artifact.
+        value: Artifact value.
+        matchString: String that matched the log line.
+        associatedArtifact: Associated parent Artifact.
+        
+    Returns:
+        Created Artifact object.
+     """
+    def createBasicLogArtifact(self, artifactTypeName, abstractFile, value, matchString,
+                               associatedArtifact):
+        artifact = abstractFile.newArtifact(self.case.getArtifactTypeID(artifactTypeName))
+        attributes = ArrayList()
+        valueDataList = value.split()
+
+        attributes.add(TeamViewerIngestModule.createAttribute(
+            BlackboardAttribute.ATTRIBUTE_TYPE.TSK_TEXT, value))
+        attributes.add(TeamViewerIngestModule.createAttribute(
+            BlackboardAttribute.ATTRIBUTE_TYPE.TSK_KEYWORD, matchString))
+        attributes.add(TeamViewerIngestModule.createAttribute(
+            BlackboardAttribute.ATTRIBUTE_TYPE.TSK_ASSOCIATED_ARTIFACT,
+            associatedArtifact.getArtifactID()))
+
+        dateString = valueDataList[0]
+        timeString = valueDataList[1]
+        if len(dateString) == 10 and len(timeString) == 12:
+            try:
+                datetimeObject = datetime.strptime("%s %s" %
+                                                   (dateString, timeString[:8]),
+                                                   "%Y/%m/%d %H:%M:%S")
+                attributes.add(TeamViewerIngestModule.createAttribute(
+                    BlackboardAttribute.ATTRIBUTE_TYPE.TSK_DATETIME,
+                    int(time.mktime(datetimeObject.timetuple()))))
+            except ValueError:
+                TeamViewerIngestModule.log(Level.WARNING,
+                                           "Failed to extract time from log line %s." %
+                                           value)
+        else:
+            TeamViewerIngestModule.log(Level.WARNING,
+                                       "Time format incorrect from log line %s." %
+                                       value)
 
         artifact.addAttributes(attributes)
         return artifact
@@ -782,21 +876,20 @@ class TeamViewerIngestModule(DataSourceIngestModule):
         valueTypeString = valueTypeObject.toString()
         if valueTypeString == "REG_EXPAND_SZ" or valueTypeString == "REG_SZ":
             return registryValueDataObject.getAsString()
-        elif valueTypeString == "REG_MULTI_SZ":
+        if valueTypeString == "REG_MULTI_SZ":
             return registryValueDataObject.getAsStringList().toString()
-        elif valueTypeString == "REG_DWORD" or valueTypeString == "REG_QWORD":
+        if valueTypeString == "REG_DWORD" or valueTypeString == "REG_QWORD":
             return str(registryValueDataObject.getAsNumber())
-        else:
-            # We don't know if the ByteBuffer is array-backed so just read the raw values
-            rawData = registryValueDataObject.getAsRawData()
-            arrayLength = rawData.remaining()
-            stringData = "Raw: "
-            for _ in range(0, arrayLength):
-                byte = rawData.get()
-                if byte < 0:
-                    byte += 256
-                stringData = stringData + " " + format(byte, '02x')
-            return stringData.strip()
+        # We don't know if the ByteBuffer is array-backed so just read the raw values
+        rawData = registryValueDataObject.getAsRawData()
+        arrayLength = rawData.remaining()
+        stringData = "Raw: "
+        for _ in range(0, arrayLength):
+            byte = rawData.get()
+            if byte < 0:
+                byte += 256
+            stringData = "%s %s" % (stringData, format(byte, '02x'))
+        return stringData.strip()
 
     """Creates an Autopsy BlackboardAttribute.
     
