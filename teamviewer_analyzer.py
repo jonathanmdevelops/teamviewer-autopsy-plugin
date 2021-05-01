@@ -109,7 +109,8 @@ class TeamViewerIngestModule(DataSourceIngestModule):
         "TSK_TEAMVIEWER_REGISTRY_ITEM": "TeamViewer Registry Items",
         "TSK_TEAMVIEWER_FT_START_DIRECTORY": "TeamViewer File Transfer Directories",
         "TSK_TEAMVIEWER_USERNAME": "TeamViewer Display Names",
-        "TSK_TEAMVIEWER_ID": "TeamViewer IDs",
+        "TSK_TEAMVIEWER_ID": "TeamViewer IDs | Confident",
+        "TSK_TEAMVIEWER_ID_POTENTIAL": "TeamViewer IDs | Potential",
         "TSK_TEAMVIEWER_MAC_ADDRESS": "TeamViewer MAC Addresses",
 
         # File artifact types.
@@ -169,6 +170,14 @@ class TeamViewerIngestModule(DataSourceIngestModule):
 
     TEMP_DIR_NAME = "teamviewer"
     MODULE_NAME = TeamViewerIngestModuleFactory.moduleDisplayName
+
+    # TeamViewer IDs are 9 or 10 digit numbers.
+    REGEX_TEAMVIEWER_ID = r"\b[0-9]{9,10}\b"
+    REGEX_TEAMVIEWER_ID_EXACT = r"\A[0-9]{9,10}\Z"
+
+    # Meeting IDs are of the form mXX-XXX-XXX.
+    REGEX_MEETING_ID = r"\bm..-...-...\b"
+    REGEX_MEETING_ID_EXACT = r"\Am..-...-...\Z"
 
     startUpSuccessful = None
     tempDirPath = None
@@ -413,7 +422,8 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                         BlackboardAttribute.ATTRIBUTE_TYPE.TSK_VERSION,
                         registryNameValueDictionary["Version"]))
 
-            elif keyName == "ClientID":
+            elif keyName == "ClientID" and TeamViewerIngestModule.matchesTeamViewerIdFormat(
+                    keyValue):
                 self.createTeamViewerIdArtefact(abstractFile, keyValue,
                                                 "ID of the Client from Registry",
                                                 originalArtifact)
@@ -436,7 +446,8 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                         localPath = ""
                         remotePath = ""
 
-                        extractedIdList = re.findall("[0-9]+", entry)
+                        extractedIdList = re.findall(TeamViewerIngestModule.REGEX_TEAMVIEWER_ID,
+                                                     entry)
                         if extractedIdList:
                             extractedId = extractedIdList[0]
 
@@ -460,7 +471,8 @@ class TeamViewerIngestModule(DataSourceIngestModule):
 
                         artifact.addAttributes(attributes)
 
-                        if extractedId != "":
+                        if extractedId != "" and \
+                                TeamViewerIngestModule.matchesTeamViewerIdFormat(extractedId):
                             self.createTeamViewerIdArtefact(abstractFile,
                                                             extractedId,
                                                             "Extracted from File Transfer Registry Key",
@@ -507,9 +519,12 @@ class TeamViewerIngestModule(DataSourceIngestModule):
     def processLogFile(self, abstractFile, artifact):
         filePath = self.createTemporaryFile(abstractFile)
         with open(filePath, "r") as openedFile:
+            description = "Extracted from log file."
             for line in openedFile:
-                self.identifyIpAddresses(abstractFile, line, "Extracted from log file.",
+                self.identifyIpAddresses(abstractFile, line, description,
                                          artifact)
+                self.identifyTeamViewerIds(abstractFile, line, description, artifact)
+
                 # A valid line must include basic information of the form:
                 # <YYYY/MM/DD> <HH:MM:SS.mmm> <PID> <Unknown> <Unknown> <Details>
                 if len(line.split()) < 6:
@@ -518,8 +533,14 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                 for match, artifactTypeName in \
                         TeamViewerIngestModule.LOG_LINE_MATCH_TYPE_DICTIONARY.items():
                     if match in line:
-                        self.createBasicLogArtifact(artifactTypeName, abstractFile,
-                                                    line, match, artifact)
+                        createdArtifact = self.createBasicLogArtifact(artifactTypeName,
+                                                                      abstractFile, line, match,
+                                                                      artifact)
+                        extractedIdList = TeamViewerIngestModule.findAllTeamViewerIds(line)
+                        # Use the first extracted ID to be the user ID.
+                        if extractedIdList:
+                            createdArtifact.addAttribute(TeamViewerIngestModule.createAttribute(
+                                BlackboardAttribute.ATTRIBUTE_TYPE.TSK_USER_ID, extractedIdList[0]))
                         break
 
 
@@ -541,6 +562,7 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                     line = openedFile.readline()
                     self.identifyIpAddresses(abstractFile, line,
                                              "Extracted from session file.", artifact)
+
                     if line == "":
                         return
                     lineValues = line.split()
@@ -548,10 +570,13 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                         continue
                     fieldName = lineValues[0]
                     description = fieldName + " extracted from Session File"
-                    if len(lineValues) == 2 and fieldName == "ClientID":
+                    if len(lineValues) == 2 and fieldName == "ClientID" and \
+                            TeamViewerIngestModule.matchesTeamViewerIdFormat(lineValues[1]):
                         self.createTeamViewerIdArtefact(abstractFile, lineValues[1],
                                                         description, artifact)
                     elif len(lineValues) >= 2 and fieldName == "ServerID":
+                        # Remove the ServerID String and any whitespace and grab the whole value.
+                        # The value here is often poorly formatted.
                         extractedData = line.replace("ServerID", "")
                         extractedData = extractedData.strip()
                         self.createTeamViewerIdArtefact(abstractFile, extractedData,
@@ -582,10 +607,13 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                 data = line.split("=")
                 if len(data) == 2 and data[0] == "targetID":
                     extractedId = data[1]
-                    if extractedId.startswith("m"):
+                    if TeamViewerIngestModule.matchesTeamViewerMeetingIdFormat(extractedId):
                         description = "Meeting ID extracted from Configuration File"
-                    else:
+                    elif TeamViewerIngestModule.matchesTeamViewerIdFormat(extractedId):
                         description = "Slave ID extracted from Configuration File"
+                    else:
+                        # End the extraction if a valid ID cannot be found.
+                        return
                     self.createTeamViewerIdArtefact(abstractFile, extractedId,
                                                     description, artifact)
             else:
@@ -603,10 +631,10 @@ class TeamViewerIngestModule(DataSourceIngestModule):
      """
     def processConnectionFile(self, abstractFile, artifact):
         filePath = self.createTemporaryFile(abstractFile)
+        description = "Extracted from connection file."
         with open(filePath, "r") as openedFile:
             for line in openedFile:
-                self.identifyIpAddresses(abstractFile, line, "Extracted from connection file.",
-                                         artifact)
+                self.identifyIpAddresses(abstractFile, line, description, artifact)
                 valueList = line.split()
                 if len(valueList) > 7:
                     self.createTeamViewerConnectionArtefacts(abstractFile, valueList, artifact)
@@ -635,26 +663,34 @@ class TeamViewerIngestModule(DataSourceIngestModule):
         self.createBasicArtifact("TSK_TEAMVIEWER_USERNAME", abstractFile, value, description,
                                  associatedArtifact)
 
-    """Searches for TeamViewer IDs in a String and creates relevant artifacts.
+    """Searches for TeamViewer IDs and Meeting IDs in a String and creates relevant artifacts.
+    
+    TeamViewer IDs are always 9 or 10 digit numbers.
+    Meeting IDs are always of the form: 'mXX-XXX-XXX'.
+    
+    IDs extracted through this method are separately made TSK_TEAMVIEWER_ID_POTENTIAL to
+    indicate to the Investigator that it cannot be relied upon without further research
+    and corroboration.
     
      Args:
          abstractFile: AbstractFile of artifact.
-         value: Value to search for IPv4 addresses.
-         description: Description to give any found addresses.
+         value: Value to search for TeamViewer IDs.
+         description: Description to give any found IDs.
          associatedArtifact: Associated parent Artifact.
      """
     def identifyTeamViewerIds(self, abstractFile, value, description, associatedArtifact):
-        regularExpressionString = r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"
-        extractedAddresses = re.findall(regularExpressionString, value)
-        for address in extractedAddresses:
-            createdArtifact = self.createBasicArtifact("TSK_TEAMVIEWER_IP_ADDRESS", abstractFile,
-                                                       address, description, associatedArtifact)
+        for idValue in TeamViewerIngestModule.findAllTeamViewerIds(value):
+            createdArtifact = self.createBasicArtifact("TSK_TEAMVIEWER_ID_POTENTIAL", abstractFile,
+                                                       idValue, description, associatedArtifact)
             attributes = ArrayList()
-
+            regularExpressionString = TeamViewerIngestModule.REGEX_TEAMVIEWER_ID
+            if str(idValue).startswith("m"):
+                regularExpressionString = TeamViewerIngestModule.REGEX_MEETING_ID
             attributes.add(TeamViewerIngestModule.createAttribute(
                 BlackboardAttribute.ATTRIBUTE_TYPE.TSK_KEYWORD_REGEXP, regularExpressionString))
             attributes.add(TeamViewerIngestModule.createAttribute(
                 BlackboardAttribute.ATTRIBUTE_TYPE.TSK_TEXT, value))
+
             createdArtifact.addAttributes(attributes)
 
     """Searches for IPv4 addresses in a String and creates relevant artifacts.
@@ -780,7 +816,9 @@ class TeamViewerIngestModule(DataSourceIngestModule):
         else:
             direction = "outgoing"
 
-        if not valueList[0].isdigit():
+        # First validate the ID and return if invalid.
+        if not TeamViewerIngestModule.matchesTeamViewerIdFormat(valueList[0])\
+                and not TeamViewerIngestModule.matchesTeamViewerMeetingIdFormat(valueList[0]):
             return
         extractedId = valueList[0]
         self.createTeamViewerIdArtefact(abstractFile, extractedId,
@@ -904,3 +942,51 @@ class TeamViewerIngestModule(DataSourceIngestModule):
     def createAttribute(attributeType, value):
         return BlackboardAttribute(attributeType.getTypeID(),
                                    TeamViewerIngestModuleFactory.moduleDisplayName, value)
+
+    """Validates a TeamViewer ID.
+    
+    This method performs only exact matching, not 'contains' matching.
+    
+    Args:
+        value: Potential TeamViewer ID value.
+        
+    Returns:
+        True if and only if the value exactly matches a TeamViewer ID format
+     """
+    @staticmethod
+    def matchesTeamViewerIdFormat(value):
+        pattern = re.compile(TeamViewerIngestModule.REGEX_TEAMVIEWER_ID_EXACT)
+        if pattern.match(value) is not None:
+            return True
+        return False
+
+    """Validates a TeamViewer Meeting ID.
+    
+    This method performs only exact matching, not 'contains' matching.
+    
+    Args:
+        value: Potential TeamViewer Meeting ID value.
+        
+    Returns:
+        True if and only if the value exactly matches the TeamViewer Meeting ID format.
+     """
+    @staticmethod
+    def matchesTeamViewerMeetingIdFormat(value):
+        pattern = re.compile(TeamViewerIngestModule.REGEX_MEETING_ID_EXACT)
+        if pattern.match(value) is not None:
+            return True
+        return False
+
+    """Extracts all TeamViewer IDs and Meeting IDs from a String.
+    
+    Args:
+        value: Value to parse for IDs.
+        
+    Returns:
+        List of extracted IDs.
+     """
+    @staticmethod
+    def findAllTeamViewerIds(value):
+        meetingIdList = re.findall(TeamViewerIngestModule.REGEX_MEETING_ID, value)
+        teamviewerIdList = re.findall(TeamViewerIngestModule.REGEX_TEAMVIEWER_ID, value)
+        return meetingIdList + teamviewerIdList
