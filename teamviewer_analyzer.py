@@ -556,36 +556,31 @@ class TeamViewerIngestModule(DataSourceIngestModule):
     def processSessionFile(self, abstractFile, artifact):
         filePath = self.createTemporaryFile(abstractFile)
         with open(filePath, "r") as openedFile:
-            line = openedFile.readline()
-            if line == "TVS":
-                for _ in range(6):
-                    line = openedFile.readline()
-                    self.identifyIpAddresses(abstractFile, line,
-                                             "Extracted from session file.", artifact)
-
-                    if line == "":
-                        return
-                    lineValues = line.split()
-                    if len(lineValues) < 1:
-                        continue
-                    fieldName = lineValues[0]
-                    description = fieldName + " extracted from Session File"
-                    if len(lineValues) == 2 and fieldName == "ClientID" and \
-                            TeamViewerIngestModule.matchesTeamViewerIdFormat(lineValues[1]):
-                        self.createTeamViewerIdArtefact(abstractFile, lineValues[1],
-                                                        description, artifact)
-                    elif len(lineValues) >= 2 and fieldName == "ServerID":
-                        # Remove the ServerID String and any whitespace and grab the whole value.
-                        # The value here is often poorly formatted.
-                        extractedData = line.replace("ServerID", "")
-                        extractedData = extractedData.strip()
-                        self.createTeamViewerIdArtefact(abstractFile, extractedData,
-                                                        description, artifact)
-                        self.createTeamViewerUsernameArtefact(abstractFile, extractedData,
-                                                              description, artifact)
-            else:
-                TeamViewerIngestModule.log(Level.WARNING, "Not a valid Session File: %s." %
-                                           abstractFile.getUniquePath())
+            # Read only the first 6 lines.
+            for _ in range(6):
+                line = openedFile.readline()
+                self.identifyIpAddresses(abstractFile, line,
+                                         "Extracted from session file.", artifact)
+                if line == "":
+                    return
+                lineValues = line.split()
+                if len(lineValues) < 1:
+                    continue
+                fieldName = lineValues[0]
+                description = fieldName + " extracted from Session File"
+                if len(lineValues) == 2 and fieldName == "ClientID" and \
+                        TeamViewerIngestModule.matchesTeamViewerIdFormat(lineValues[1]):
+                    self.createTeamViewerIdArtefact(abstractFile, lineValues[1],
+                                                    description, artifact)
+                elif len(lineValues) >= 2 and fieldName == "ServerID":
+                    # Remove the ServerID String and any whitespace and grab the whole value.
+                    # The value here is often poorly formatted.
+                    extractedData = line.replace("ServerID", "")
+                    extractedData = extractedData.strip()
+                    self.createTeamViewerIdArtefact(abstractFile, extractedData,
+                                                    description, artifact)
+                    self.createTeamViewerUsernameArtefact(abstractFile, extractedData,
+                                                          description, artifact)
 
     """Processes a TeamViewer configuration file.
     
@@ -600,7 +595,7 @@ class TeamViewerIngestModule(DataSourceIngestModule):
         filePath = self.createTemporaryFile(abstractFile)
         with open(filePath, "r") as openedFile:
             line = openedFile.readline()
-            if "[TeamViewer Configuration]" in line:
+            if "TeamViewer Configuration" in line:
                 line = openedFile.readline()
                 self.identifyIpAddresses(abstractFile, line, "Extracted from configuration file.",
                                          artifact)
@@ -608,16 +603,21 @@ class TeamViewerIngestModule(DataSourceIngestModule):
                 if len(data) == 2 and data[0] == "targetID":
                     extractedId = data[1]
                     if TeamViewerIngestModule.matchesTeamViewerMeetingIdFormat(extractedId):
-                        description = "Meeting ID extracted from Configuration File"
+                        self.createTeamViewerIdArtefact(abstractFile, extractedId,
+                                                        "Meeting ID extracted from Configuration "
+                                                        "File", artifact)
                     elif TeamViewerIngestModule.matchesTeamViewerIdFormat(extractedId):
-                        description = "Slave ID extracted from Configuration File"
+                        self.createTeamViewerIdArtefact(abstractFile, extractedId,
+                                                        "Slave ID extracted from Configuration "
+                                                        "File", artifact)
                     else:
                         # End the extraction if a valid ID cannot be found.
-                        return
-                    self.createTeamViewerIdArtefact(abstractFile, extractedId,
-                                                    description, artifact)
+                        TeamViewerIngestModule.log(Level.WARNING, "Could not retrieve valid "
+                                                                  "targetID from Configuration "
+                                                                  "File: %s." %
+                                                   abstractFile.getUniquePath())
             else:
-                TeamViewerIngestModule.log(Level.INFO, "Not a valid Configuration File: %s." %
+                TeamViewerIngestModule.log(Level.WARNING, "Not a valid Configuration File: %s." %
                                            abstractFile.getUniquePath())
 
     """Processes a TeamViewer connection file.
@@ -649,7 +649,7 @@ class TeamViewerIngestModule(DataSourceIngestModule):
      """
     def createTeamViewerIdArtefact(self, abstractFile, value, description, associatedArtifact):
         self.createBasicArtifact("TSK_TEAMVIEWER_ID", abstractFile,
-                                 value, description, associatedArtifact)
+                                 value.strip(), description, associatedArtifact)
 
     """Creates a new TeamViewer Username Artifact.
     
@@ -660,7 +660,7 @@ class TeamViewerIngestModule(DataSourceIngestModule):
          associatedArtifact: Associated parent Artifact.
      """
     def createTeamViewerUsernameArtefact(self, abstractFile, value, description, associatedArtifact):
-        self.createBasicArtifact("TSK_TEAMVIEWER_USERNAME", abstractFile, value, description,
+        self.createBasicArtifact("TSK_TEAMVIEWER_USERNAME", abstractFile, value.strip(), description,
                                  associatedArtifact)
 
     """Searches for TeamViewer IDs and Meeting IDs in a String and creates relevant artifacts.
@@ -956,7 +956,7 @@ class TeamViewerIngestModule(DataSourceIngestModule):
     @staticmethod
     def matchesTeamViewerIdFormat(value):
         pattern = re.compile(TeamViewerIngestModule.REGEX_TEAMVIEWER_ID_EXACT)
-        if pattern.match(value) is not None:
+        if pattern.match(value.strip()) is not None:
             return True
         return False
 
@@ -973,7 +973,7 @@ class TeamViewerIngestModule(DataSourceIngestModule):
     @staticmethod
     def matchesTeamViewerMeetingIdFormat(value):
         pattern = re.compile(TeamViewerIngestModule.REGEX_MEETING_ID_EXACT)
-        if pattern.match(value) is not None:
+        if pattern.match(value.strip()) is not None:
             return True
         return False
 
